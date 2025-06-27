@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>High-Performance Lightning Tracker</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+      body,
+      html {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        background-color: #1a1a1a;
+        color: #f0f0f0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+      }
+      #map {
+        width: 100%;
+        height: 100%;
+      }
+      .info-panel {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        z-index: 1000;
+        background: rgba(26, 26, 26, 0.8);
+        padding: 10px;
+        border-radius: 5px;
+        border: 1px solid #444;
+      }
+      .status-light {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background-color: #f00;
+        margin-right: 8px;
+        transition: background-color 0.5s;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div class="info-panel">
+      <div>
+        <span class="status-light" id="status-dot"></span>
+        <strong id="status-text">Connecting...</strong>
+      </div>
+      <div>
+        <strong>Strikes/Sec: </strong>
+        <span id="sps-counter">0</span>
+      </div>
+    </div>
+
+    <script>
+      const map_obj = L.map("map").setView([20, 0], 3);
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", {
+        attribution: "CARTO",
+        maxZoom: 19,
+      }).addTo(map_obj);
+
+      // This is the fast "phosphor" canvas layer that actually works
+      L.PhosphorLayer = L.Layer.extend({
+        onAdd: function (map) {
+          this._map = map;
+          this._canvas = L.DomUtil.create("canvas", "leaflet-canvas-layer");
+          this._ctx = this._canvas.getContext("2d");
+          this._resize();
+          map.getPanes().overlayPane.appendChild(this._canvas);
+          map.on("move", this._reset, this);
+          map.on("resize", this._resize, this);
+          this._animate();
+        },
+        onRemove: function (map) {
+          L.DomUtil.remove(this._canvas);
+          map.off("move", this._reset, this);
+          map.off("resize", this._resize, this);
+        },
+        addStrikes: function (strikes) {
+          if (!this._map) return;
+          strikes.forEach((s) => {
+            const point = this._map.latLngToContainerPoint([s.lat, s.lon]);
+            this._drawStrike(point);
+          });
+        },
+        _drawStrike: function (point) {
+          this._ctx.beginPath();
+          this._ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
+          this._ctx.fillStyle = "rgba(255, 20, 20, 0.9)";
+          this._ctx.fill();
+        },
+        _fade: function () {
+          // this is the magic part. fades the whole screen a little bit.
+          this._ctx.save();
+          this._ctx.globalCompositeOperation = "destination-in";
+          this._ctx.fillStyle = "rgba(0, 0, 0, 0.95)";
+          this._ctx.fillRect(0, 0, this._canvas.width, this._canvas.height);
+          this._ctx.restore();
+        },
+        _animate: function () {
+          this._fade();
+          L.Util.requestAnimFrame(this._animate, this);
+        },
+        _resize: function () {
+          const size = this._map.getSize();
+          this._canvas.width = size.x;
+          this._canvas.height = size.y;
+          this._reset();
+        },
+        _reset: function () {
+          const topLeft = this._map.containerPointToLayerPoint([0, 0]);
+          L.DomUtil.setPosition(this._canvas, topLeft);
+        },
+      });
+
+      // --- Main App Logic ---
+      const phosphor_layer = new L.PhosphorLayer();
+      phosphor_layer.addTo(map_obj);
+
+      const status_dot = document.getElementById("status-dot");
+      const status_text = document.getElementById("status-text");
+      const sps_counter = document.getElementById("sps-counter");
+      let strikes_in_second = 0;
+
+      setInterval(() => {
+        sps_counter.textContent = strikes_in_second.toLocaleString();
+        strikes_in_second = 0;
+      }, 1000);
+
+      /*
+      // old polling method, replaced with websocket because it was slow and laggy
+      // you'd have to wait 2 seconds to see anything new. websockets are instant.
+      setInterval(() => {
+          fetch('/api/strikes')
+              .then(res => res.json())
+              .then(data => {
+                  // do stuff with data
+                  // this was a bad idea
+              })
+      }, 2000);
+      */
+
+      const socket = io();
+      socket.on("connect", () => {
+        status_dot.style.backgroundColor = "#0f0";
+        status_text.textContent = "Live";
+      });
+      socket.on("disconnect", () => {
+        status_dot.style.backgroundColor = "#f00";
+        status_text.textContent = "Disconnected";
+      });
+      socket.on("strike_batch", (batch) => {
+        phosphor_layer.addStrikes(batch);
+        strikes_in_second += batch.length;
+      });
+
+      /*
+      // --- OLD SLOW CODE GRAVEYARD ---
+      //
+      // This was the first attempt at a canvas layer. It was too slow.
+      // It kept a list of every dot in a JS array and had to loop the whole
+      // thing every frame to calculate the fade. The array would get huge
+      // and lock up the browser. The stateless "phosphor" method is way better.
+      //
+      L.CanvasLayer = L.Layer.extend({
+        initialize: function (options) {
+          L.setOptions(this, options);
+          this._strikes = [];
+          this._animationFrameId = null;
+        },
+        onAdd: function (map) {
+          this._map = map;
+          this._canvas = L.DomUtil.create("canvas", "leaflet-canvas-layer");
+          const size = this._map.getSize();
+          this._canvas.width = size.x;
+          this._canvas.height = size.y;
+          const animated = this._map.options.zoomAnimation && L.Browser.any3d;
+          L.DomUtil.addClass(this._canvas, "leaflet-zoom-" + (animated ? "animated" : "hide"));
+          this._map.getPanes().overlayPane.appendChild(this._canvas);
+          this._ctx = this._canvas.getContext("2d");
+          map.on("moveend", this._reset, this);
+          map.on("resize", this._resize, this);
+          if (map.options.zoomAnimation && L.Browser.any3d) {
+            map.on("zoomanim", this._animateZoom, this);
+          }
+          this._startAnimation();
+        },
+        onRemove: function (map) {
+          L.DomUtil.remove(this._canvas);
+          map.off("moveend", this._reset, this);
+          map.off("resize", this._resize, this);
+          if (map.options.zoomAnimation && L.Browser.any3d) {
+            map.off("zoomanim", this._animateZoom, this);
+          }
+          this._stopAnimation();
+        },
+        addStrikes: function (strikes) {
+          const now = performance.now();
+          strikes.forEach(s => {
+            this._strikes.push({ latlng: L.latLng(s.lat, s.lon), addedTime: now });
+          });
+        },
+        _startAnimation: function () {
+          if (!this._animationFrameId) {
+            this._animationFrameId = L.Util.requestAnimFrame(this._animate, this);
+          }
+        },
+        _stopAnimation: function () {
+          if (this._animationFrameId) {
+            L.Util.cancelAnimFrame(this._animationFrameId);
+            this._animationFrameId = null;
+          }
+        },
+        _animate: function () {
+          this._draw();
+          this._animationFrameId = L.Util.requestAnimFrame(this._animate, this);
+        },
+        _draw: function () {
+          if (!this._map) return;
+          const now = performance.now();
+          const lifeTime = 2000;
+          this._ctx.clearRect(0, 0, this._canvas.width, this._canvas.height);
+          this._strikes = this._strikes.filter(s => now - s.addedTime < lifeTime);
+          this._strikes.forEach(s => {
+            const age = now - s.addedTime;
+            const opacity = 1 - (age / lifeTime);
+            const point = this._map.latLngToContainerPoint(s.latlng);
+            this._ctx.beginPath();
+            this._ctx.arc(point.x, point.y, 4, 0, Math.PI * 2, false);
+            this._ctx.fillStyle = `rgba(255, 255, 0, ${opacity * 0.8})`;
+            this._ctx.fill();
+            this._ctx.strokeStyle = `rgba(255, 140, 0, ${opacity})`;
+            this._ctx.stroke();
+          });
+        },
+        _resize: function (resizeEvent) {
+          this._canvas.width = resizeEvent.newSize.x;
+          this._canvas.height = resizeEvent.newSize.y;
+        },
+        _reset: function () {
+          const topLeft = this._map.containerPointToLayerPoint([0, 0]);
+          L.DomUtil.setPosition(this._canvas, topLeft);
+        },
+        _animateZoom: function (e) {
+          const scale = this._map.getZoomScale(e.zoom),
+            offset = this._map._getCenterOffset(e.center)._multiplyBy(-scale).subtract(this._map._getMapPanePos());
+          L.DomUtil.setTransform(this._canvas, offset, scale);
+        },
+      });
+      */
+    </script>
+  </body>
+</html>
