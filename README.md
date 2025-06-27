@@ -18,9 +18,7 @@ new dots just get drawn once. fire and forget. then the whole canvas just gets f
 
 now it handles the firehose. it works.
 
-## run it/try it
-
-go to: [lightning.robinsweb.site](https://lightning.robinsweb.site/)
+## run it/
 
 1.  `pip install -r requirements.txt`
 2.  `python app.py`
