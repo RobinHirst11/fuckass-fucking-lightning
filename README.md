@@ -20,7 +20,7 @@ now it handles the firehose. it works.
 
 ## run it/try it
 
-go to: [robinsweb.site/lightning](http://robinsweb.site/lightning)
+go to: [lightning.robinsweb.site](https://lightning.robinsweb.site/)
 
 1.  `pip install -r requirements.txt`
 2.  `python app.py`
